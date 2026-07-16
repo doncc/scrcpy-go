@@ -39,7 +39,7 @@ class ScrcpyConnectorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Scrcpy 快捷连接器")
-        self.root.geometry("680x450")
+        self.root.geometry("680x630")
         self.root.resizable(False, False)
         
         # 设置样式
