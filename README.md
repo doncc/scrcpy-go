@@ -2,7 +2,14 @@
 
 一个为 `scrcpy` 打造的轻量级图形化快捷连接与设备管理工具（基于 Python Tkinter 开发）。它能够帮助你摆脱命令行，快速完成 Android 设备的有线/无线（TCP/IP）投屏连接、自定义参数配置，并内置了实时的 Logcat 日志抓取与过滤工具。
 
+## 📸 界面预览
+
+| 主界面 / 连接管理 | 日志控制台 |
+| :---: | :---: |
+| ![主界面](img/1.png) | ![日志控制台](img/2.png) |
+
 ## 🌟 主要功能
+
 
 - **环境自动检测**：启动时自动寻找同级目录或系统环境变量中的 `adb` 和 `scrcpy` 路径。
 - **设备图形化管理**：
@@ -31,14 +38,14 @@
      sudo apt install python3-tk
      ```
 3. **ADB 和 Scrcpy**：
-   - 脚本会自动检测系统 `PATH`。如果找不到，也可以直接将 `adb` 和 `scrcpy` 的可执行文件放置在与 `scrcpy_quick_connect.py` 同级的目录下。
+   - 脚本会自动检测系统 `PATH`。如果找不到，也可以直接将此 Python 脚本复制到已下载的 `scrcpy` 根目录（解压路径）下运行，或者将 `adb` 和 `scrcpy` 的可执行文件放置在与 `scrcpy-go.py` 同级的目录下。
 
 ## 🚀 快速使用
 
 ### 1. 运行工具
 在终端中切换到脚本目录并执行：
 ```bash
-python3 scrcpy_quick_connect.py
+python3 scrcpy-go.py
 ```
 
 ### 2. 创建桌面快捷方式 (Linux)
