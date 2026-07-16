@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
 import queue
+import webbrowser
 
 # 获取当前脚本的绝对路径目录
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,7 +39,7 @@ class ScrcpyConnectorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Scrcpy 快捷连接器")
-        self.root.geometry("680x420")
+        self.root.geometry("680x450")
         self.root.resizable(False, False)
         
         # 设置样式
@@ -57,8 +58,31 @@ class ScrcpyConnectorApp:
         self.refresh_device_list()
 
     def create_widgets(self):
+        # 底部作者开源信息栏 (方案 B)
+        footer_frame = ttk.Frame(self.root, padding=(10, 0, 10, 10))
+        footer_frame.pack(side="bottom", fill="x")
+        
+        github_url = "https://github.com/doncc/scrcpy-go"
+        
+        # 使用 Label 作为超链接样式
+        link_label = tk.Label(
+            footer_frame,
+            text=f"⭐ 觉得好用请给个 Star: {github_url}",
+            fg="#0066cc",      # 经典的超链接蓝色
+            cursor="hand2",     # 鼠标悬停时显示手型
+            font=("Arial", 9)
+        )
+        link_label.pack(side="left")
+        
+        # 绑定点击链接时打开浏览器
+        link_label.bind("<Button-1>", lambda event: webbrowser.open_new(github_url))
+        
+        # 鼠标悬停时的下划线效果
+        link_label.bind("<Enter>", lambda event: link_label.config(font=("Arial", 9, "underline")))
+        link_label.bind("<Leave>", lambda event: link_label.config(font=("Arial", 9)))
+
         # 整体左右分栏
-        main_frame = ttk.Frame(self.root, padding=10)
+        main_frame = ttk.Frame(self.root, padding=(10, 10, 10, 0))
         main_frame.pack(fill="both", expand=True)
         
         # 左栏：设备列表 (分配扩展空间)
