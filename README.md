@@ -2,7 +2,7 @@
 
 [![scrcpy-go](https://shields.io/github/v/release/doncc/scrcpy-go)](https://github.com)
 
-一个为 `scrcpy` 打造的轻量级图形化快捷连接与设备管理工具。它能够帮助你摆脱命令行，快速完成 Android 设备的有线/无线（TCP/IP）投屏连接、自定义参数配置，并内置了实时的 Logcat 日志抓取与过滤工具。
+一个为 `scrcpy` 打造的轻量级图形化快捷连接与设备管理工具。适配Windows、Linux、MacOS三端，它能够帮助你摆脱命令行，快速完成 Android 设备的有线/无线（TCP/IP）投屏连接、自定义参数配置，并内置了实时的 Logcat 日志抓取与过滤工具。
 
 ## 📸 界面预览
 
