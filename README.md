@@ -97,6 +97,7 @@
 8. Alt + B：Android 返回键；
 9. Alt + N：Android 下拉通知栏；
 10. Alt + 键盘上下按键：调节 Android 系统音量；
+11. 鼠标右键：返回功能；
 
 ---
 
