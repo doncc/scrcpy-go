@@ -47,14 +47,15 @@ class UpdateSkipStoreTest {
     }
 
     @Test
-    fun returnsFalseWhenDirectoryIsNotWritable() {
-        val readOnlyDir = File(tempDir, "read-only").apply { mkdirs() }
-        readOnlyDir.setWritable(false)
-        try {
-            val readOnlyStore = UpdateSkipStore(File(readOnlyDir, "update-skip.properties"))
-            assertFalse(readOnlyStore.save("1.1.0"))
-        } finally {
-            readOnlyDir.setWritable(true)
-        }
+    fun returnsFalseWhenTargetPathCannotBeWritten() {
+        // Windows 上给目录设置只读属性并不会阻止在其中创建文件，无法模拟“目录不可写”；
+        // 改为让目标路径本身被一个目录占住：临时文件写入成功，最后一步移动必然失败，
+        // 这样 Windows / Linux / macOS 都能稳定进入写入失败分支。
+        skipFile.mkdirs()
+
+        val blockedStore = UpdateSkipStore(skipFile)
+
+        assertFalse(blockedStore.save("1.1.0"))
+        assertFalse(File(tempDir, "update-skip.properties.tmp").exists())
     }
 }
