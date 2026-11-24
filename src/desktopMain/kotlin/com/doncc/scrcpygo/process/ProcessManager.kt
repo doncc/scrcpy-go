@@ -5,7 +5,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+
+/**
+ * 命令执行结果。
+ * timedOut 为 true 时表示进程在超时时间内没有退出，退出码不可用。
+ */
+data class CommandResult(
+    val exitCode: Int,
+    val stdout: String,
+    val stderr: String,
+    val timedOut: Boolean = false
+)
 
 /**
  * 子进程管理器
@@ -24,20 +37,62 @@ object ProcessManager {
 
     /**
      * 基础命令行同步执行工具
-     * 返回 stdout 和 stderr 输出
+     * 返回 stdout 和 stderr 输出；保留原有返回结构，内部委托给带退出码的实现
      */
-    suspend fun runCommand(vararg cmd: String): Pair<String, String> = withContext(Dispatchers.IO) {
+    suspend fun runCommand(vararg cmd: String): Pair<String, String> {
+        val result = runCommandResult(*cmd)
+        return Pair(result.stdout, result.stderr)
+    }
+
+    /**
+     * 执行命令并返回退出码、标准输出、标准错误和超时标记。
+     * stdout/stderr 在独立线程中读取，避免输出较多时阻塞；
+     * timeoutMs 为 0 表示不设超时，保持原有调用方行为。
+     */
+    suspend fun runCommandResult(
+        vararg cmd: String,
+        timeoutMs: Long = 0
+    ): CommandResult = withContext(Dispatchers.IO) {
+        var timedOut = false
         try {
             val process = ProcessBuilder(*cmd).start()
-            val stdoutReader = BufferedReader(InputStreamReader(process.inputStream))
-            val stderrReader = BufferedReader(InputStreamReader(process.errorStream))
-            
-            val stdout = stdoutReader.readText().trim()
-            val stderr = stderrReader.readText().trim()
-            process.waitFor()
-            Pair(stdout, stderr)
+
+            // 两个流分别读取，防止其中一个缓冲区写满后进程无法退出
+            val stdoutFuture = CompletableFuture.supplyAsync {
+                process.inputStream.bufferedReader().use { it.readText() }
+            }
+            val stderrFuture = CompletableFuture.supplyAsync {
+                process.errorStream.bufferedReader().use { it.readText() }
+            }
+
+            val finished = if (timeoutMs > 0) {
+                process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+            } else {
+                process.waitFor()
+                true
+            }
+
+            if (!finished) {
+                timedOut = true
+                process.destroyForcibly()
+                process.waitFor(1, TimeUnit.SECONDS)
+            }
+
+            val stdout = stdoutFuture.get(2, TimeUnit.SECONDS).trim()
+            val stderr = stderrFuture.get(2, TimeUnit.SECONDS).trim()
+            CommandResult(
+                exitCode = if (finished) process.exitValue() else -1,
+                stdout = stdout,
+                stderr = stderr,
+                timedOut = !finished
+            )
         } catch (e: Exception) {
-            Pair("", e.message ?: "命令行执行发生异常")
+            CommandResult(
+                exitCode = -1,
+                stdout = "",
+                stderr = e.message ?: "命令行执行发生异常",
+                timedOut = timedOut
+            )
         }
     }
 
@@ -51,15 +106,36 @@ object ProcessManager {
     }
 
     /**
-     * 异步拉起特定设备的 scrcpy 投屏进程，并捕获 stderr 以供报错诊断
+     * 自动补全 adb 绝对路径，并返回带退出码的命令结果
      */
-    fun launchScrcpy(serial: String, customArgs: List<String>): Result<Process> {
+    suspend fun runAdbCommandResult(
+        vararg args: String,
+        timeoutMs: Long = 0
+    ): CommandResult {
+        val adbPath = PlatformUtils.getBinaryPath("adb")
+        val cmd = arrayOf(adbPath) + args
+        return runCommandResult(*cmd, timeoutMs = timeoutMs)
+    }
+
+    /**
+     * 异步拉起特定设备的 scrcpy 投屏进程，并捕获 stderr 以供报错诊断。
+     * windowTitle 非空时追加唯一窗口标题，便于区分同型号设备和后续定位。
+     */
+    fun launchScrcpy(
+        serial: String,
+        customArgs: List<String>,
+        windowTitle: String? = null
+    ): Result<Process> {
         val scrcpyPath = PlatformUtils.getBinaryPath("scrcpy")
         val adbPath = PlatformUtils.getBinaryPath("adb")
         
         // 组装最终命令行: scrcpy -s <serial> [附加参数...]
         val cmd = mutableListOf(scrcpyPath, "-s", serial)
         cmd.addAll(customArgs)
+        if (!windowTitle.isNullOrBlank()) {
+            cmd.add("--window-title")
+            cmd.add(windowTitle)
+        }
 
         return try {
             val pb = ProcessBuilder(cmd)

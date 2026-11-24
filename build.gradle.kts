@@ -55,6 +55,10 @@ kotlin {
                 // 协程支持
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.8.0")
+
+                // 跨平台读取其他进程的窗口位置（Linux X11 / Windows）
+                implementation("net.java.dev.jna:jna:5.14.0")
+                implementation("net.java.dev.jna:jna-platform:5.14.0")
             }
         }
         val desktopTest by getting {

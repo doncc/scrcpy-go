@@ -29,6 +29,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.*
+import com.doncc.scrcpygo.control.ControlPadRules
+import com.doncc.scrcpygo.control.ControlPadSession
 import com.doncc.scrcpygo.history.TcpConnectionHistoryRules
 import com.doncc.scrcpygo.history.TcpConnectionHistoryStore
 import com.doncc.scrcpygo.history.TcpConnectionRecord
@@ -131,6 +133,9 @@ fun main() = application {
     // 保存已开启的 Logcat 独立窗口会话 (Key: 设备序列号)
     val activeLogcatSessions = remember { mutableStateMapOf<String, LogcatSession>() }
 
+    // 保存已开启的投屏控制条会话 (Key: 设备序列号)
+    val activeControlPads = remember { mutableStateMapOf<String, ControlPadSession>() }
+
     // 触发全局提示框的方法
     fun showToast(title: String, message: String) {
         alertTitle = title
@@ -210,6 +215,13 @@ fun main() = application {
         }
     }
 
+    // 断开投屏并同步清理控制条、运行状态和子进程
+    fun disconnectDevice(serial: String) {
+        activeControlPads.remove(serial)
+        runningDevices.remove(serial)
+        ProcessManager.terminateProcessForDevice(serial)
+    }
+
     // 启动投屏
     fun startMirroring(device: Device) {
         if (!scrcpyExists) {
@@ -217,21 +229,44 @@ fun main() = application {
             return
         }
         val argsList = scrcpyArgs.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
-        val result = ProcessManager.launchScrcpy(device.serial, argsList)
+        val windowTitle = if (ControlPadRules.hasCustomWindowTitle(argsList)) {
+            null
+        } else {
+            ControlPadRules.buildWindowTitle(device.model, device.serial)
+        }
+        val result = ProcessManager.launchScrcpy(device.serial, argsList, windowTitle)
         if (result.isFailure) {
             showToast("错误", "启动投屏失败:\n${result.exceptionOrNull()?.message}")
         } else {
             val process = result.getOrNull()
             if (process != null) {
+                // 同设备重连时忽略旧会话占用的槽位，尽量复用原来的横向位置
+                val usedSlots = activeControlPads
+                    .filterKeys { it != device.serial }
+                    .values
+                    .map { it.slotIndex }
+                    .toSet()
+                activeControlPads[device.serial] = ControlPadSession(
+                    serial = device.serial,
+                    model = device.model,
+                    process = process,
+                    slotIndex = ControlPadRules.allocateSlot(usedSlots)
+                )
+
                 // 启动成功，立即点亮指示灯
                 if (!runningDevices.contains(device.serial)) {
                     runningDevices.add(device.serial)
                 }
-                // 开启后台协程，等待进程退出后更新状态，熄灭指示灯
+
+                // 等待进程退出；只有当前会话仍属于这个进程时才清理，避免快速重连误删新控制条
                 coroutineScope.launch(Dispatchers.IO) {
                     process.waitFor()
                     withContext(Dispatchers.Main) {
-                        runningDevices.remove(device.serial)
+                        val currentSession = activeControlPads[device.serial]
+                        if (currentSession != null && currentSession.process === process) {
+                            activeControlPads.remove(device.serial)
+                            runningDevices.remove(device.serial)
+                        }
                     }
                 }
             }
@@ -280,6 +315,16 @@ fun main() = application {
                     activeLogcatSessions.remove(serial)
                 }
             }
+        }
+    }
+
+    // 独立投屏控制条窗口渲染循环
+    activeControlPads.forEach { (serial, session) ->
+        key(serial) {
+            ControlPadWindow(
+                session = session,
+                onDisconnect = { disconnectDevice(serial) }
+            )
         }
     }
 
@@ -487,9 +532,9 @@ fun main() = application {
                                     }
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Button(
-                                        onClick = { 
-                                            selectedDevice?.let { 
-                                                ProcessManager.terminateProcessForDevice(it.serial)
+                                        onClick = {
+                                            selectedDevice?.let {
+                                                disconnectDevice(it.serial)
                                                 refreshDeviceList()
                                             }
                                         },
