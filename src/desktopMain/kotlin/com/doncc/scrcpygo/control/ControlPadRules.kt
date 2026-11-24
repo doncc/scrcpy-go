@@ -1,5 +1,7 @@
 package com.doncc.scrcpygo.control
 
+import kotlin.math.roundToInt
+
 /**
  * 控制条相关的纯规则：
  * 1. 计算主屏右侧的初始位置与多设备槽位；
@@ -86,6 +88,31 @@ object ControlPadRules {
         val centerY = target.y + target.height / 2
         return centerX in cover.x until (cover.x + cover.width) &&
             centerY in cover.y until (cover.y + cover.height)
+    }
+
+    /**
+     * 把 Win32 返回的物理像素窗口矩形换算成 AWT/Compose 使用的逻辑像素坐标。
+     *
+     * Windows 在 125%/150% 等缩放比例下，`GetWindowRect`/DWM 拿到的是物理像素，
+     * 而 `Window.setLocation`、`GraphicsConfiguration.bounds` 用的是逻辑像素。
+     * 两者混用会让控制条在缩放屏上整体偏移（150% 时坐标被再乘 1.5）。
+     *
+     * 左右/上下边沿分别取整再算宽高，避免宽高各自取整后出现 1px 缝隙。
+     *
+     * @param scale 窗口所在显示器的缩放比例（100% 为 1.0）
+     */
+    fun toLogicalBounds(bounds: ScrcpyWindowBounds, scale: Double): ScrcpyWindowBounds {
+        if (scale <= 0.0 || !scale.isFinite() || scale == 1.0) return bounds
+        val left = (bounds.x / scale).roundToInt()
+        val top = (bounds.y / scale).roundToInt()
+        val right = ((bounds.x + bounds.width) / scale).roundToInt()
+        val bottom = ((bounds.y + bounds.height) / scale).roundToInt()
+        return ScrcpyWindowBounds(
+            x = left,
+            y = top,
+            width = (right - left).coerceAtLeast(1),
+            height = (bottom - top).coerceAtLeast(1)
+        )
     }
 
     /**

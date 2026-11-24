@@ -1,6 +1,7 @@
 package com.doncc.scrcpygo.control
 
 import com.doncc.scrcpygo.utils.PlatformUtils
+import com.sun.jna.Library
 import com.sun.jna.Native
 import com.sun.jna.NativeLong
 import com.sun.jna.Pointer
@@ -13,8 +14,11 @@ import com.sun.jna.ptr.NativeLongByReference
 import com.sun.jna.ptr.PointerByReference
 
 /**
- * scrcpy 投屏窗口外框的屏幕位置和大小，单位是像素。
+ * scrcpy 投屏窗口外框的屏幕位置和大小，坐标是 AWT/Compose 使用的逻辑像素。
  * 外框包含窗口管理器添加的标题栏和边框，便于控制条与窗口视觉边沿对齐。
+ *
+ * Windows 下先取 DWM 的可见外框（排除窗口四周用于拖拽缩放的透明边框），
+ * 再按显示器缩放比例换算成逻辑像素，保证 125%/150% 缩放时也能贴紧窗口。
  */
 data class ScrcpyWindowBounds(
     val x: Int,
@@ -541,9 +545,39 @@ private data class FrameExtents(
     val bottom: Int
 )
 
+/**
+ * JNA 5.14 的 User32 映射里还没有 GetDpiForWindow（Win10 1607+），这里单独声明。
+ * 加载失败（老系统）时返回 null，调用方按 100% 缩放处理。
+ */
+private interface DpiAwareUser32 : Library {
+    fun GetDpiForWindow(hwnd: WinDef.HWND): Int
+}
+
+/**
+ * jna-platform 5.14 没有 Dwmapi 映射，这里只声明用到的 DwmGetWindowAttribute。
+ */
+private interface DwmApi : Library {
+    fun DwmGetWindowAttribute(hwnd: WinDef.HWND, attribute: Int, rect: WinDef.RECT, size: Int): Int
+}
+
+private val dpiAwareUser32: DpiAwareUser32? by lazy {
+    runCatching { Native.load("user32", DpiAwareUser32::class.java) }.getOrNull()
+}
+
+private val dwmApi: DwmApi? by lazy {
+    runCatching { Native.load("dwmapi", DwmApi::class.java) }.getOrNull()
+}
+
 private object WindowsWindowLocator {
+    /** DWMWA_EXTENDED_FRAME_BOUNDS：DWM 合成的可见外框，不含四周透明拖拽边框 */
+    private const val DWMWA_EXTENDED_FRAME_BOUNDS = 9
+
+    private const val USER_DEFAULT_SCREEN_DPI = 96
+
     fun find(serial: String): ScrcpyWindowState {
         var visibleBounds: ScrcpyWindowBounds? = null
+        // 遮挡判断用物理像素，返回给 UI 的是换算后的逻辑像素
+        var physicalBounds: ScrcpyWindowBounds? = null
         var scrcpyHwnd: WinDef.HWND? = null
         var hiddenMatch = false
 
@@ -563,13 +597,18 @@ private object WindowsWindowLocator {
                             if (minimized || !User32.INSTANCE.IsWindowVisible(hwnd)) {
                                 hiddenMatch = true
                             } else {
-                                val rect = WinDef.RECT()
-                                if (User32.INSTANCE.GetWindowRect(hwnd, rect)) {
-                                    visibleBounds = ScrcpyWindowBounds(
+                                val rect = visibleFrame(hwnd)
+                                if (rect != null) {
+                                    val physical = ScrcpyWindowBounds(
                                         x = rect.left,
                                         y = rect.top,
                                         width = rect.right - rect.left,
                                         height = rect.bottom - rect.top
+                                    )
+                                    physicalBounds = physical
+                                    visibleBounds = ControlPadRules.toLogicalBounds(
+                                        physical,
+                                        displayScale(hwnd)
                                     )
                                     scrcpyHwnd = hwnd
                                 }
@@ -583,18 +622,47 @@ private object WindowsWindowLocator {
 
         User32.INSTANCE.EnumWindows(callback, null)
         val bounds = visibleBounds
+        val physical = physicalBounds
         return when {
-            bounds != null -> ScrcpyWindowState.Visible(
+            bounds != null && physical != null -> ScrcpyWindowState.Visible(
                 bounds,
                 isCoveredByForeground(
                     User32.INSTANCE.GetForegroundWindow(),
                     scrcpyHwnd,
-                    bounds
+                    physical
                 )
             )
             hiddenMatch -> ScrcpyWindowState.Hidden
             else -> ScrcpyWindowState.NotFound
         }
+    }
+
+    /**
+     * 优先用 DWM 的可见外框：Win10/11 的 GetWindowRect 会包含四周 7~8px 的透明缩放边框，
+     * 直接拿它对齐会让控制条离窗口视觉边沿还差一条缝。
+     */
+    private fun visibleFrame(hwnd: WinDef.HWND): WinDef.RECT? {
+        val dwmRect = WinDef.RECT()
+        val hresult = runCatching {
+            dwmApi?.DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                dwmRect,
+                dwmRect.size()
+            )
+        }.getOrNull()
+        if (hresult == 0 && dwmRect.right > dwmRect.left && dwmRect.bottom > dwmRect.top) {
+            return dwmRect
+        }
+
+        val fallback = WinDef.RECT()
+        return if (User32.INSTANCE.GetWindowRect(hwnd, fallback)) fallback else null
+    }
+
+    /** 窗口所在显示器的缩放比例（100% 为 1.0）；取不到时按 100% 处理 */
+    private fun displayScale(hwnd: WinDef.HWND): Double {
+        val dpi = runCatching { dpiAwareUser32?.GetDpiForWindow(hwnd) ?: 0 }.getOrDefault(0)
+        return if (dpi in 48..960) dpi.toDouble() / USER_DEFAULT_SCREEN_DPI else 1.0
     }
 
     /**

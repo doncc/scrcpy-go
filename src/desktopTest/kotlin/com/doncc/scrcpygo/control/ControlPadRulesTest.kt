@@ -210,4 +210,74 @@ class ControlPadRulesTest {
 
         assertFalse(ControlPadRules.isCoveredAtCenter(mirror, empty))
     }
+
+    @Test
+    fun physicalBoundsAreConvertedToLogicalAt150Percent() {
+        val physical = ScrcpyWindowBounds(x = 757, y = 419, width = 1046, height = 656)
+
+        val logical = ControlPadRules.toLogicalBounds(physical, 1.5)
+
+        assertEquals(505, logical.x)
+        assertEquals(279, logical.y)
+        // 右边沿 1803 / 1.5 = 1202，下边沿 1075 / 1.5 ≈ 717
+        assertEquals(1202, logical.x + logical.width)
+        assertEquals(717, logical.y + logical.height)
+    }
+
+    @Test
+    fun boundsAreUnchangedAt100PercentOrInvalidScale() {
+        val physical = ScrcpyWindowBounds(x = 757, y = 419, width = 1046, height = 656)
+
+        assertEquals(physical, ControlPadRules.toLogicalBounds(physical, 1.0))
+        assertEquals(physical, ControlPadRules.toLogicalBounds(physical, 0.0))
+        assertEquals(physical, ControlPadRules.toLogicalBounds(physical, Double.NaN))
+    }
+
+    @Test
+    fun scaledWindowDocksFlushRightAndTopAt150Percent() {
+        // Windows 150% 缩放下 2560x1600 屏幕的逻辑工作区是 1707x1019
+        val logical = ControlPadRules.toLogicalBounds(
+            ScrcpyWindowBounds(x = 757, y = 419, width = 1046, height = 656),
+            1.5
+        )
+
+        val position = ControlPadRules.calculateDockedPosition(
+            windowX = logical.x,
+            windowY = logical.y,
+            windowWidth = logical.width,
+            padWidthPx = 76,
+            padHeightPx = 620,
+            workAreaX = 0,
+            workAreaY = 0,
+            workAreaWidth = 1707,
+            workAreaHeight = 1019
+        )
+
+        // 控制条左边缘紧贴投屏窗口右边缘，顶部与窗口顶部平齐
+        assertEquals(logical.x + logical.width, position.x)
+        assertEquals(logical.y, position.y)
+    }
+
+    @Test
+    fun scaledWindowFlipsToLeftWhenRightSideRunsOut() {
+        val logical = ControlPadRules.toLogicalBounds(
+            ScrcpyWindowBounds(x = 1800, y = 200, width = 1000, height = 600),
+            1.5
+        )
+
+        val position = ControlPadRules.calculateDockedPosition(
+            windowX = logical.x,
+            windowY = logical.y,
+            windowWidth = logical.width,
+            padWidthPx = 76,
+            padHeightPx = 620,
+            workAreaX = 0,
+            workAreaY = 0,
+            workAreaWidth = 1707,
+            workAreaHeight = 1019
+        )
+
+        assertEquals(logical.x - 76, position.x)
+        assertEquals(logical.y, position.y)
+    }
 }

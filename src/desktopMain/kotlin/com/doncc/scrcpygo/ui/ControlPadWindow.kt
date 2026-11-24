@@ -6,7 +6,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -35,6 +34,7 @@ import java.awt.GraphicsEnvironment
 import java.awt.Insets
 import java.awt.Rectangle
 import java.awt.Toolkit
+import kotlin.math.roundToInt
 
 private val PAD_WIDTH = 76.dp
 private val PAD_HEIGHT = 620.dp
@@ -50,25 +50,26 @@ fun ControlPadWindow(
     session: ControlPadSession,
     onDisconnect: () -> Unit
 ) {
-    val density = LocalDensity.current
     val workArea = rememberPrimaryWorkArea()
     val locatorSupported = remember { ScrcpyWindowLocator.isSupported }
     var visible by remember { mutableStateOf(!locatorSupported) }
-    val position = remember(session.serial, session.slotIndex, density, workArea) {
+    // 控制条规则统一按逻辑像素计算：WindowPosition 的 Dp 数值在 Compose 桌面端会原样
+    // 传给 AWT setLocation（AWT 使用的是逻辑像素），所以这里直接用 dp 数值承载逻辑像素。
+    val position = remember(session.serial, session.slotIndex, workArea) {
         val point = ControlPadRules.calculatePosition(
             workAreaX = workArea.x,
             workAreaY = workArea.y,
             workAreaWidth = workArea.width,
             workAreaHeight = workArea.height,
-            padWidthPx = with(density) { PAD_WIDTH.roundToPx() },
-            padHeightPx = with(density) { PAD_HEIGHT.roundToPx() },
-            marginPx = with(density) { SCREEN_MARGIN.roundToPx() },
-            gapPx = with(density) { PAD_GAP.roundToPx() },
+            padWidthPx = PAD_WIDTH.value.roundToInt(),
+            padHeightPx = PAD_HEIGHT.value.roundToInt(),
+            marginPx = SCREEN_MARGIN.value.roundToInt(),
+            gapPx = PAD_GAP.value.roundToInt(),
             slotIndex = session.slotIndex
         )
         WindowPosition(
-            with(density) { point.x.toDp() },
-            with(density) { point.y.toDp() }
+            point.x.dp,
+            point.y.dp
         )
     }
 
@@ -174,9 +175,9 @@ private fun FrameWindowScope.ControlPadBody(
         }
     }
 
-    val density = LocalDensity.current
-    val padWidthPx = with(density) { PAD_WIDTH.roundToPx() }
-    val padHeightPx = with(density) { PAD_HEIGHT.roundToPx() }
+    // 窗口宽高和位置都使用逻辑像素（dp 数值），与 ScrcpyWindowLocator 返回的坐标同一单位。
+    val padWidthPx = PAD_WIDTH.value.roundToInt()
+    val padHeightPx = PAD_HEIGHT.value.roundToInt()
 
     fun applyDock(bounds: ScrcpyWindowBounds) {
         val workArea = workAreaForWindow(bounds)
