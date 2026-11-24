@@ -51,7 +51,7 @@ object ProcessManager {
     }
 
     /**
-     * 异步拉起特定设备的 scrcpy 投屏进程
+     * 异步拉起特定设备的 scrcpy 投屏进程，并捕获 stderr 以供报错诊断
      */
     fun launchScrcpy(serial: String, customArgs: List<String>): Result<Process> {
         val scrcpyPath = PlatformUtils.getBinaryPath("scrcpy")
@@ -72,16 +72,40 @@ object ProcessManager {
             }
             env["ADB"] = adbPath
 
-            // 将流重定向抛弃，防止输出缓冲区满导致子进程挂起
+            // 将标准输出重定向以避免缓冲区阻塞，错误流使用 pipe 方式进行异步读取
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD)
-            pb.redirectError(ProcessBuilder.Redirect.DISCARD)
+
+            // 启动前先终结旧的同一设备连接
+            terminateProcessForDevice(serial)
 
             val process = pb.start()
-            
-            // 启动前先终结旧的同一设备连接，并缓存当前实例
-            terminateProcessForDevice(serial)
+
+            // 后台异步读取 stderr 错误日志，防止阻塞并记录最后报错信息
+            val stderrBuffer = StringBuilder()
+            val errorThread = Thread {
+                try {
+                    val reader = BufferedReader(InputStreamReader(process.errorStream))
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        if (stderrBuffer.length < 4096) {
+                            stderrBuffer.append(line).append("\n")
+                        }
+                    }
+                } catch (e: Exception) {
+                    // 忽略读取流闭合异常
+                }
+            }
+            errorThread.isDaemon = true
+            errorThread.start()
+
+            // 等待一小段时间检测进程是否立即闪退
+            Thread.sleep(300)
+            if (!process.isAlive && process.exitValue() != 0) {
+                val errorMsg = stderrBuffer.toString().trim().ifEmpty { "进程以非零退出码终止: ${process.exitValue()}" }
+                return Result.failure(RuntimeException("Scrcpy 投屏服务启动失败:\n$errorMsg"))
+            }
+
             runningProcesses[serial] = process
-            
             Result.success(process)
         } catch (e: Exception) {
             Result.failure(e)

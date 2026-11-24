@@ -49,10 +49,17 @@ kotlin {
                 implementation(compose.foundation)
                 implementation(compose.material)
                 implementation(compose.ui)
+                // 更新提示条的滑入滑出动画
+                implementation(compose.animation)
                 
                 // 协程支持
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.8.0")
+            }
+        }
+        val desktopTest by getting {
+            dependencies {
+                implementation(kotlin("test"))
             }
         }
     }
@@ -114,6 +121,9 @@ compose.desktop {
         mainClass = "com.doncc.scrcpygo.MainKt"
         
         nativeDistributions {
+            // 更新检测使用 JDK 内置 HttpClient，jlink 打包默认不含该模块，必须显式声明
+            modules("java.net.http")
+
             // 配置外部资源根目录，打包时会自动将此目录下的所有内容加入 App 根目录下的 resources 中，不打进 JAR
             appResourcesRootDir.set(project.layout.projectDirectory.dir("src/desktopMain/external-resources"))
             

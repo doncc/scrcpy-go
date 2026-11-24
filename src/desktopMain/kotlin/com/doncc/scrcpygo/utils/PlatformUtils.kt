@@ -1,7 +1,9 @@
 package com.doncc.scrcpygo.utils
 
+import java.awt.Desktop
 import java.io.File
 import java.io.FileWriter
+import java.net.URI
 
 /**
  * 平台辅助工具类
@@ -32,6 +34,27 @@ object PlatformUtils {
                 !path.endsWith("java.exe") &&
                 !path.endsWith("javaw") &&
                 !path.endsWith("javaw.exe")
+    }
+
+    /**
+     * 应用本地数据目录，三端统一放在用户主目录下
+     */
+    val appDataDir: File by lazy {
+        File(System.getProperty("user.home"), ".scrcpy-go")
+    }
+
+    /**
+     * TCP 成功连接的历史记录文件
+     */
+    val tcpHistoryFile: File by lazy {
+        File(appDataDir, "tcp-history.properties")
+    }
+
+    /**
+     * “跳过此版本”的更新提示记录文件
+     */
+    val updateSkipFile: File by lazy {
+        File(appDataDir, "update-skip.properties")
     }
 
     /**
@@ -131,6 +154,28 @@ object PlatformUtils {
         }
 
         return null
+    }
+
+    /**
+     * 使用系统默认浏览器打开链接。
+     * 无桌面环境、无默认浏览器或调用异常时返回 false，由调用方决定如何提示。
+     */
+    fun openUrl(url: String): Boolean {
+        return try {
+            if (!Desktop.isDesktopSupported()) {
+                false
+            } else {
+                val desktop = Desktop.getDesktop()
+                if (desktop.isSupported(Desktop.Action.BROWSE)) {
+                    desktop.browse(URI(url))
+                    true
+                } else {
+                    false
+                }
+            }
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /**

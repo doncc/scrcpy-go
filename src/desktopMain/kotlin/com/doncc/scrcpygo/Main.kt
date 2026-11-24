@@ -15,6 +15,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -27,10 +29,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.*
+import com.doncc.scrcpygo.history.TcpConnectionHistoryRules
+import com.doncc.scrcpygo.history.TcpConnectionHistoryStore
+import com.doncc.scrcpygo.history.TcpConnectionRecord
 import com.doncc.scrcpygo.process.LogEntry
 import com.doncc.scrcpygo.process.LogcatController
 import com.doncc.scrcpygo.process.ProcessManager
 import com.doncc.scrcpygo.ui.*
+import com.doncc.scrcpygo.update.HttpReleaseFetcher
+import com.doncc.scrcpygo.update.HostPlatform
+import com.doncc.scrcpygo.update.UpdateCheckResult
+import com.doncc.scrcpygo.update.UpdateChecker
+import com.doncc.scrcpygo.update.UpdateSkipStore
 import com.doncc.scrcpygo.utils.PlatformUtils
 import com.doncc.scrcpygo.utils.VersionUtils
 import kotlinx.coroutines.Dispatchers
@@ -38,7 +48,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.awt.FileDialog
 import java.io.File
-import java.net.URI
 
 /**
  * 设备数据类
@@ -49,6 +58,35 @@ data class Device(
     val type: String, // USB 或 TCP
     val status: String // device, unauthorized, offline 等
 )
+
+/**
+ * 解析 adb devices -l 的文本输出，返回设备列表
+ */
+private fun parseDeviceList(stdout: String): List<Device> {
+    val parsedDevices = mutableListOf<Device>()
+    val lines = stdout.split("\n")
+    if (lines.size > 1) {
+        for (i in 1 until lines.size) {
+            val line = lines[i].trim()
+            if (line.isEmpty()) continue
+            val parts = line.split(Regex("\\s+"))
+            if (parts.size >= 2) {
+                val serial = parts[0]
+                val status = parts[1]
+                var model = "未知设备"
+                for (part in parts) {
+                    if (part.startsWith("model:")) {
+                        model = part.substringAfter("model:")
+                        break
+                    }
+                }
+                val isTcp = serial.contains(":")
+                parsedDevices.add(Device(serial, model, if (isTcp) "TCP" else "USB", status))
+            }
+        }
+    }
+    return parsedDevices
+}
 
 /**
  * Logcat 会话持有者
@@ -74,10 +112,21 @@ fun main() = application {
     
     var ipAddress by remember { mutableStateOf("192.168.100.254") }
     var scrcpyArgs by remember { mutableStateOf("--no-audio") }
-    
+
+    // TCP 成功连接历史：列表、当前选中项与清空确认状态
+    val historyStore = remember { TcpConnectionHistoryStore() }
+    var connectionHistory by remember { mutableStateOf<List<TcpConnectionRecord>>(emptyList()) }
+    var selectedHistoryAddress by remember { mutableStateOf<String?>(null) }
+    var showClearHistoryConfirm by remember { mutableStateOf(false) }
+    val ipFocusRequester = remember { FocusRequester() }
+
     var alertTitle by remember { mutableStateOf("") }
     var alertMessage by remember { mutableStateOf("") }
     var showAlert by remember { mutableStateOf(false) }
+
+    // 更新检测：跳过记录存储与待展示的更新提示
+    val updateSkipStore = remember { UpdateSkipStore() }
+    var updatePrompt by remember { mutableStateOf<UpdatePrompt?>(null) }
     
     // 保存已开启的 Logcat 独立窗口会话 (Key: 设备序列号)
     val activeLogcatSessions = remember { mutableStateMapOf<String, LogcatSession>() }
@@ -89,58 +138,74 @@ fun main() = application {
         showAlert = true
     }
 
+    // 关闭更新提示条
+    fun dismissUpdatePrompt() {
+        updatePrompt = null
+    }
+
+    // 打开当前平台的安装包下载；没有匹配资产时退到 release 页面
+    fun openUpdateDownload(prompt: UpdatePrompt) {
+        val target = prompt.downloadUrl ?: prompt.pageUrl
+        coroutineScope.launch {
+            val opened = withContext(Dispatchers.IO) { PlatformUtils.openUrl(target) }
+            if (!opened) {
+                showToast("无法打开浏览器", "请手动访问：\n${prompt.pageUrl}")
+            }
+            updatePrompt = null
+        }
+    }
+
+    // 永久跳过该版本，后续启动不再提示
+    fun skipUpdateVersion(prompt: UpdatePrompt) {
+        coroutineScope.launch {
+            withContext(Dispatchers.IO) { updateSkipStore.save(prompt.newVersion) }
+            updatePrompt = null
+        }
+    }
+
+    // 环境检测与设备查询，返回 null 表示 adb 不可用
+    suspend fun loadDeviceList(): List<Device>? {
+        val adbPath = PlatformUtils.getBinaryPath("adb")
+        val scrcpyPath = PlatformUtils.getBinaryPath("scrcpy")
+        val foundAdb = File(adbPath).exists() || adbPath == "adb"
+        val foundScrcpy = File(scrcpyPath).exists() || scrcpyPath == "scrcpy"
+        withContext(Dispatchers.Main) {
+            adbExists = foundAdb
+            scrcpyExists = foundScrcpy
+        }
+        if (!foundAdb) return null
+
+        val (stdout, _) = ProcessManager.runAdbCommand("devices", "-l")
+        return parseDeviceList(stdout)
+    }
+
+    // 把最新设备列表同步到界面状态，保留原有的指示灯与选中状态修正逻辑
+    fun applyDeviceList(parsedDevices: List<Device>) {
+        devices = parsedDevices
+
+        // 增量同步运行状态到 runningDevices，防止界面闪烁
+        val currentRunning = parsedDevices.filter { ProcessManager.isDeviceRunning(it.serial) }.map { it.serial }.toSet()
+        runningDevices.removeAll { it !in currentRunning }
+        currentRunning.forEach { serial ->
+            if (!runningDevices.contains(serial)) {
+                runningDevices.add(serial)
+            }
+        }
+
+        // 修正选中状态
+        if (selectedDevice != null && !devices.any { it.serial == selectedDevice?.serial }) {
+            selectedDevice = null
+        }
+    }
+
     // 刷新设备列表管道
     fun refreshDeviceList() {
         coroutineScope.launch {
-            // 环境检测
-            val adbPath = PlatformUtils.getBinaryPath("adb")
-            val scrcpyPath = PlatformUtils.getBinaryPath("scrcpy")
-            adbExists = File(adbPath).exists() || adbPath == "adb"
-            scrcpyExists = File(scrcpyPath).exists() || scrcpyPath == "scrcpy"
-            
-            if (!adbExists) {
+            val parsedDevices = loadDeviceList()
+            if (parsedDevices != null) {
+                applyDeviceList(parsedDevices)
+            } else {
                 devices = emptyList()
-                return@launch
-            }
-
-            // 获取 ADB 挂载设备
-            val (stdout, _) = ProcessManager.runAdbCommand("devices", "-l")
-            val parsedDevices = mutableListOf<Device>()
-            val lines = stdout.split("\n")
-            if (lines.size > 1) {
-                for (i in 1 until lines.size) {
-                    val line = lines[i].trim()
-                    if (line.isEmpty()) continue
-                    val parts = line.split(Regex("\\s+"))
-                    if (parts.size >= 2) {
-                        val serial = parts[0]
-                        val status = parts[1]
-                        var model = "未知设备"
-                        for (part in parts) {
-                            if (part.startsWith("model:")) {
-                                model = part.substringAfter("model:")
-                                break
-                            }
-                        }
-                        val isTcp = serial.contains(":")
-                        parsedDevices.add(Device(serial, model, if (isTcp) "TCP" else "USB", status))
-                    }
-                }
-            }
-            devices = parsedDevices
-            
-            // 增量同步运行状态到 runningDevices，防止界面闪烁
-            val currentRunning = parsedDevices.filter { ProcessManager.isDeviceRunning(it.serial) }.map { it.serial }.toSet()
-            runningDevices.removeAll { it !in currentRunning }
-            currentRunning.forEach { serial ->
-                if (!runningDevices.contains(serial)) {
-                    runningDevices.add(serial)
-                }
-            }
-            
-            // 修正选中状态
-            if (selectedDevice != null && !devices.any { it.serial == selectedDevice?.serial }) {
-                selectedDevice = null
             }
         }
     }
@@ -176,6 +241,26 @@ fun main() = application {
     // 初始化加载
     LaunchedEffect(Unit) {
         refreshDeviceList()
+        connectionHistory = withContext(Dispatchers.IO) { historyStore.load() }
+
+        // 启动时后台检测最新 release；任何失败都静默，不影响启动
+        val checkResult = withContext(Dispatchers.IO) {
+            UpdateChecker.evaluate(
+                currentVersion = VersionUtils.version,
+                skippedVersion = updateSkipStore.load(),
+                platform = HostPlatform.platformKey(),
+                arch = HostPlatform.archKey(),
+                fetcher = HttpReleaseFetcher()
+            )
+        }
+        if (checkResult is UpdateCheckResult.Available) {
+            updatePrompt = UpdatePrompt(
+                newVersion = checkResult.newVersion,
+                currentVersion = checkResult.currentVersion,
+                downloadUrl = checkResult.downloadUrl,
+                pageUrl = checkResult.pageUrl
+            )
+        }
     }
 
     // 独立二级 Logcat 窗口渲染循环
@@ -208,7 +293,8 @@ fun main() = application {
     ) {
         ScrcpyGoTheme {
             Surface(color = MaterialTheme.colors.background) {
-                Column(modifier = Modifier.fillMaxSize()) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    Column(modifier = Modifier.fillMaxSize()) {
                     // 主体布局
                     Row(
                         modifier = Modifier
@@ -455,8 +541,30 @@ fun main() = application {
                                         value = ipAddress,
                                         onValueChange = { ipAddress = it },
                                         label = { Text("设备 IP (默认端口 5555)") },
-                                        modifier = Modifier.fillMaxWidth(),
+                                        modifier = Modifier.fillMaxWidth().focusRequester(ipFocusRequester),
                                         singleLine = true
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    ConnectionHistoryPanel(
+                                        records = connectionHistory,
+                                        selectedAddress = selectedHistoryAddress,
+                                        onSelect = { selectedHistoryAddress = it.address },
+                                        onDoubleClick = { record ->
+                                            ipAddress = record.address
+                                            selectedHistoryAddress = record.address
+                                            ipFocusRequester.requestFocus()
+                                        },
+                                        onDelete = { record ->
+                                            coroutineScope.launch {
+                                                val result = withContext(Dispatchers.IO) { historyStore.remove(record.address) }
+                                                connectionHistory = result.records
+                                                if (selectedHistoryAddress == record.address) selectedHistoryAddress = null
+                                                if (!result.persisted) {
+                                                    showToast("提示", "历史记录删除后保存失败，下次启动可能恢复。")
+                                                }
+                                            }
+                                        },
+                                        onClear = { showClearHistoryConfirm = true }
                                     )
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Row(modifier = Modifier.fillMaxWidth()) {
@@ -465,9 +573,31 @@ fun main() = application {
                                                 coroutineScope.launch {
                                                     val ipPort = if (ipAddress.contains(":")) ipAddress else "$ipAddress:5555"
                                                     val (stdout, stderr) = ProcessManager.runAdbCommand("connect", ipPort)
-                                                    refreshDeviceList()
-                                                    if (stdout.contains("connected to")) {
-                                                        showToast("TCP 连接成功", "已成功连接到设备 $ipPort。\n您可以在设备列表中选中并投屏。")
+                                                    val latestDevices = loadDeviceList() ?: emptyList()
+                                                    applyDeviceList(latestDevices)
+                                                    val normalizedAddress = TcpConnectionHistoryRules.normalizeAddress(ipPort) ?: ipPort
+                                                    val matchedDevice = latestDevices.firstOrNull {
+                                                        it.serial.equals(normalizedAddress, ignoreCase = true)
+                                                    }
+                                                    val success = TcpConnectionHistoryRules.isConnectSuccess(stdout) ||
+                                                        matchedDevice?.status == "device"
+                                                    if (success) {
+                                                        // 设备型号为“未知设备”时不覆盖历史里已有的型号
+                                                        val matchedModel = matchedDevice?.model?.takeIf { it != "未知设备" }
+                                                        val historyResult = withContext(Dispatchers.IO) {
+                                                            historyStore.recordSuccess(normalizedAddress, matchedModel)
+                                                        }
+                                                        connectionHistory = historyResult.records
+                                                        selectedHistoryAddress = normalizedAddress
+                                                        val persistHint = if (historyResult.persisted) {
+                                                            ""
+                                                        } else {
+                                                            "\n历史记录未能保存，请检查用户目录写入权限。"
+                                                        }
+                                                        showToast(
+                                                            "TCP 连接成功",
+                                                            "已成功连接到设备 $ipPort。\n您可以在设备列表中选中并投屏。$persistHint"
+                                                        )
                                                     } else {
                                                         val err = if (stderr.isNotEmpty()) stderr else stdout
                                                         showToast("TCP 连接失败", "连接 $ipPort 失败:\n$err")
@@ -562,16 +692,56 @@ fun main() = application {
                             modifier = Modifier
                                 .clickable {
                                     coroutineScope.launch(Dispatchers.IO) {
-                                        try {
-                                            java.awt.Desktop.getDesktop().browse(URI(githubUrl))
-                                        } catch (e: Exception) {
-                                            // 忽略错误
-                                        }
+                                        PlatformUtils.openUrl(githubUrl)
                                     }
                                 }
                                 .align(Alignment.CenterStart)
                         )
                     }
+                    }
+
+                    // 底部更新提示条：浮在内容之上、Star 栏上方，一直显示直到用户选择
+                    UpdateSnackbarHost(
+                        prompt = updatePrompt,
+                        onUpgrade = { openUpdateDownload(it) },
+                        onSkip = { skipUpdateVersion(it) },
+                        onIgnore = { dismissUpdatePrompt() },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(start = 12.dp, end = 12.dp, bottom = 44.dp)
+                    )
+                }
+
+                // 清空历史前确认，避免误操作
+                if (showClearHistoryConfirm) {
+                    AlertDialog(
+                        onDismissRequest = { showClearHistoryConfirm = false },
+                        title = { Text("清空历史连接", style = MaterialTheme.typography.h2) },
+                        text = { Text("确定要清空全部 TCP 历史连接记录吗？此操作不可恢复。", style = MaterialTheme.typography.body1) },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    showClearHistoryConfirm = false
+                                    coroutineScope.launch {
+                                        val result = withContext(Dispatchers.IO) { historyStore.clear() }
+                                        connectionHistory = result.records
+                                        selectedHistoryAddress = null
+                                        if (!result.persisted) {
+                                            showToast("提示", "历史记录清空后保存失败，下次启动可能恢复。")
+                                        }
+                                    }
+                                }
+                            ) {
+                                Text("清空", color = ColorError)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showClearHistoryConfirm = false }) {
+                                Text("取消")
+                            }
+                        },
+                        shape = AppShapes.medium
+                    )
                 }
 
                 // 弹出对话框提示
