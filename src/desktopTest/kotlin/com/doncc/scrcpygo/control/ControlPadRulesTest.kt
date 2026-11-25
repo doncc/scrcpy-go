@@ -3,6 +3,7 @@ package com.doncc.scrcpygo.control
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ControlPadRulesTest {
@@ -172,43 +173,123 @@ class ControlPadRulesTest {
     }
 
     @Test
-    fun foregroundWindowCoveringTheCenterHidesThePad() {
-        val mirror = ScrcpyWindowBounds(x = 300, y = 200, width = 1000, height = 600)
-        val browser = ScrcpyWindowBounds(x = 0, y = 0, width = 1920, height = 1080)
-
-        assertTrue(ControlPadRules.isCoveredAtCenter(mirror, browser))
+    fun padAlwaysOnTopFollowsMirrorInDockedModeAndStaysOnTopInFallbackMode() {
+        assertFalse(ControlPadRules.shouldPadBeAlwaysOnTop(true, false, false))
+        assertTrue(ControlPadRules.shouldPadBeAlwaysOnTop(true, false, true))
+        assertTrue(ControlPadRules.shouldPadBeAlwaysOnTop(true, true, false))
+        assertTrue(ControlPadRules.shouldPadBeAlwaysOnTop(false, false, false))
     }
 
     @Test
-    fun foregroundWindowBesideTheMirrorDoesNotHideThePad() {
-        val mirror = ScrcpyWindowBounds(x = 0, y = 100, width = 900, height = 600)
-        val browserOnSecondScreen = ScrcpyWindowBounds(x = 1920, y = 0, width = 1920, height = 1080)
+    fun planPadZOrderReturnsNoOpWhenAlreadyDirectlyAboveMirrorInSameBand() {
+        val normalNoOp = ControlPadRules.planPadZOrder(
+            padWindowId = 100L,
+            padAlwaysOnTop = false,
+            mirrorAlwaysOnTop = false,
+            windowAboveMirrorId = 100L,
+            windowAboveMirrorAlwaysOnTop = false
+        )
+        val topMostNoOp = ControlPadRules.planPadZOrder(
+            padWindowId = 100L,
+            padAlwaysOnTop = true,
+            mirrorAlwaysOnTop = true,
+            windowAboveMirrorId = 100L,
+            windowAboveMirrorAlwaysOnTop = true
+        )
 
-        assertFalse(ControlPadRules.isCoveredAtCenter(mirror, browserOnSecondScreen))
+        assertEquals(PadZOrderAction.NoOp, normalNoOp)
+        assertEquals(PadZOrderAction.NoOp, topMostNoOp)
     }
 
     @Test
-    fun partialCoverWithoutReachingTheCenterKeepsThePad() {
-        val mirror = ScrcpyWindowBounds(x = 0, y = 100, width = 1000, height = 600)
-        val sideWindow = ScrcpyWindowBounds(x = 0, y = 100, width = 300, height = 600)
+    fun planPadZOrderPlacesBelowNormalSiblingWhenMirrorIsBehindAnotherWindow() {
+        val action = ControlPadRules.planPadZOrder(
+            padWindowId = 100L,
+            padAlwaysOnTop = false,
+            mirrorAlwaysOnTop = false,
+            windowAboveMirrorId = 200L,
+            windowAboveMirrorAlwaysOnTop = false
+        )
 
-        assertFalse(ControlPadRules.isCoveredAtCenter(mirror, sideWindow))
+        assertEquals(PadZOrderAction.PlaceBelowSibling(200L, false, false), action)
     }
 
     @Test
-    fun coverTouchingOnlyTheCenterStillHidesThePad() {
-        val mirror = ScrcpyWindowBounds(x = 0, y = 0, width = 1000, height = 600)
-        val dialog = ScrcpyWindowBounds(x = 490, y = 290, width = 20, height = 20)
+    fun planPadZOrderDemotesFromTopMostWhenMirrorReturnsToNormalLayer() {
+        val actionBehindOther = ControlPadRules.planPadZOrder(
+            padWindowId = 100L,
+            padAlwaysOnTop = true,
+            mirrorAlwaysOnTop = false,
+            windowAboveMirrorId = 200L,
+            windowAboveMirrorAlwaysOnTop = false
+        )
+        val actionDirectlyAbove = ControlPadRules.planPadZOrder(
+            padWindowId = 100L,
+            padAlwaysOnTop = true,
+            mirrorAlwaysOnTop = false,
+            windowAboveMirrorId = 100L,
+            windowAboveMirrorAlwaysOnTop = true
+        )
 
-        assertTrue(ControlPadRules.isCoveredAtCenter(mirror, dialog))
+        assertEquals(PadZOrderAction.PlaceBelowSibling(200L, false, true), actionBehindOther)
+        assertEquals(PadZOrderAction.PlaceAtNormalTop(true), actionDirectlyAbove)
     }
 
     @Test
-    fun zeroSizedWindowNeverCountsAsCovering() {
-        val mirror = ScrcpyWindowBounds(x = 100, y = 100, width = 800, height = 500)
-        val empty = ScrcpyWindowBounds(x = 0, y = 0, width = 0, height = 1080)
+    fun planPadZOrderHandlesTopOfNormalLayerBelowSystemTopMostWindow() {
+        val action = ControlPadRules.planPadZOrder(
+            padWindowId = 100L,
+            padAlwaysOnTop = false,
+            mirrorAlwaysOnTop = false,
+            windowAboveMirrorId = 300L,
+            windowAboveMirrorAlwaysOnTop = true
+        )
 
-        assertFalse(ControlPadRules.isCoveredAtCenter(mirror, empty))
+        assertEquals(PadZOrderAction.PlaceAtNormalTop(false), action)
+    }
+
+    @Test
+    fun planPadZOrderPromotesToTopMostWhenMirrorIsAlwaysOnTop() {
+        val atTop = ControlPadRules.planPadZOrder(
+            padWindowId = 100L,
+            padAlwaysOnTop = false,
+            mirrorAlwaysOnTop = true,
+            windowAboveMirrorId = null,
+            windowAboveMirrorAlwaysOnTop = false
+        )
+        val belowAnotherTopMost = ControlPadRules.planPadZOrder(
+            padWindowId = 100L,
+            padAlwaysOnTop = false,
+            mirrorAlwaysOnTop = true,
+            windowAboveMirrorId = 400L,
+            windowAboveMirrorAlwaysOnTop = true
+        )
+
+        assertEquals(PadZOrderAction.PlaceAtTopMost, atTop)
+        assertEquals(PadZOrderAction.PlaceBelowSibling(400L, true, true), belowAnotherTopMost)
+    }
+
+    @Test
+    fun raiseMirrorBelowPadOnlyTriggersWhenMirrorIsNotImmediatelyBelow() {
+        assertFalse(ControlPadRules.shouldRaiseMirrorBelowPad(mirrorWindowId = 500L, windowBelowPadId = 500L))
+        assertTrue(ControlPadRules.shouldRaiseMirrorBelowPad(mirrorWindowId = 500L, windowBelowPadId = 600L))
+        assertTrue(ControlPadRules.shouldRaiseMirrorBelowPad(mirrorWindowId = 500L, windowBelowPadId = null))
+        assertFalse(ControlPadRules.shouldRaiseMirrorBelowPad(mirrorWindowId = 0L, windowBelowPadId = 600L))
+    }
+
+    @Test
+    fun stackHelpersFindImmediateNeighborsBottomToTop() {
+        val stack = listOf(10L, 20L, 30L)
+
+        assertEquals(20L, ControlPadRules.findWindowAboveInStack(stack, 10L))
+        assertEquals(30L, ControlPadRules.findWindowAboveInStack(stack, 20L))
+        assertNull(ControlPadRules.findWindowAboveInStack(stack, 30L))
+        assertNull(ControlPadRules.findWindowAboveInStack(stack, 99L))
+
+        assertNull(ControlPadRules.findWindowBelowInStack(stack, 10L))
+        assertEquals(10L, ControlPadRules.findWindowBelowInStack(stack, 20L))
+        assertEquals(20L, ControlPadRules.findWindowBelowInStack(stack, 30L))
+        assertNull(ControlPadRules.findWindowBelowInStack(stack, 99L))
     }
 
     @Test

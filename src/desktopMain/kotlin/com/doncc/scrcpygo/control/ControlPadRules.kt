@@ -5,7 +5,8 @@ import kotlin.math.roundToInt
 /**
  * 控制条相关的纯规则：
  * 1. 计算主屏右侧的初始位置与多设备槽位；
- * 2. 生成 scrcpy 窗口标题并判断用户是否已自定义标题。
+ * 2. 生成 scrcpy 窗口标题并判断用户是否已自定义标题；
+ * 3. 推导控制条与投屏窗口的 Z 轴层级关系。
  *
  * 这里不依赖 Compose 或窗口系统，便于单元测试。
  */
@@ -76,18 +77,114 @@ object ControlPadRules {
     }
 
     /**
-     * 判断前台窗口是否盖住了投屏窗口的中心点。
-     * 控制条据此跟随投屏窗口的可见性：投屏窗口被其他窗口盖住时隐藏，
-     * 只是失去焦点但仍露着时继续显示，避免误隐藏。
+     * 推导控制条是否应该强制置顶。
+     *
+     * 正常贴靠时跟随投屏窗口的置顶状态：投屏窗口置顶则控制条也置顶，
+     * 否则两者都留在普通层级，由 Z 轴规则保持相邻。
+     * 平台不支持窗口查找或投屏窗口长期找不到时退回固定右缘，
+     * 此时控制条必须始终置顶，避免被其他窗口盖住而无法操作。
      */
-    fun isCoveredAtCenter(target: ScrcpyWindowBounds, cover: ScrcpyWindowBounds): Boolean {
-        if (target.width <= 0 || target.height <= 0 || cover.width <= 0 || cover.height <= 0) {
-            return false
+    fun shouldPadBeAlwaysOnTop(
+        locatorSupported: Boolean,
+        fallbackMode: Boolean,
+        mirrorAlwaysOnTop: Boolean
+    ): Boolean {
+        if (!locatorSupported || fallbackMode) return true
+        return mirrorAlwaysOnTop
+    }
+
+    /**
+     * 根据当前 Z 轴层级关系推导控制条的下一次重排动作。
+     *
+     * 目标：控制条始终紧贴在投屏窗口正上方，并且与投屏窗口处在同一层级带
+     * （同为普通窗口或同为置顶窗口）；投屏窗口与投屏窗口之上的那个窗口
+     * 决定了控制条究竟应该放在哪个窗口下面。
+     *
+     * @param padWindowId 控制条自身的原生窗口 id
+     * @param padAlwaysOnTop 控制条当前是否处于置顶层级
+     * @param mirrorAlwaysOnTop 投屏窗口当前是否处于置顶层级
+     * @param windowAboveMirrorId 紧排在投屏窗口上方的第一个窗口 id，没有则为 null
+     * @param windowAboveMirrorAlwaysOnTop 上述窗口是否处于置顶层级
+     */
+    fun planPadZOrder(
+        padWindowId: Long,
+        padAlwaysOnTop: Boolean,
+        mirrorAlwaysOnTop: Boolean,
+        windowAboveMirrorId: Long?,
+        windowAboveMirrorAlwaysOnTop: Boolean
+    ): PadZOrderAction {
+        if (padWindowId == 0L) {
+            return PadZOrderAction.NoOp
         }
-        val centerX = target.x + target.width / 2
-        val centerY = target.y + target.height / 2
-        return centerX in cover.x until (cover.x + cover.width) &&
-            centerY in cover.y until (cover.y + cover.height)
+        // 控制条已经紧贴在投屏窗口正上方，且两者处于同一层级带时无需动作
+        if (windowAboveMirrorId == padWindowId && padAlwaysOnTop == mirrorAlwaysOnTop) {
+            return PadZOrderAction.NoOp
+        }
+
+        if (mirrorAlwaysOnTop) {
+            if (windowAboveMirrorId == null || windowAboveMirrorId == padWindowId) {
+                return PadZOrderAction.PlaceAtTopMost
+            }
+            return PadZOrderAction.PlaceBelowSibling(
+                siblingWindowId = windowAboveMirrorId,
+                targetAlwaysOnTop = true,
+                changeTopMostBand = !padAlwaysOnTop
+            )
+        }
+
+        if (windowAboveMirrorId != null &&
+            !windowAboveMirrorAlwaysOnTop &&
+            windowAboveMirrorId != padWindowId
+        ) {
+            return PadZOrderAction.PlaceBelowSibling(
+                siblingWindowId = windowAboveMirrorId,
+                targetAlwaysOnTop = false,
+                changeTopMostBand = padAlwaysOnTop
+            )
+        }
+
+        return PadZOrderAction.PlaceAtNormalTop(demoteFromTopMost = padAlwaysOnTop)
+    }
+
+    /**
+     * 判断控制条获得焦点后是否需要把投屏窗口重新拉回控制条正下方。
+     * 投屏窗口 id 无效时不动；投屏窗口已经紧贴在下方时也不动。
+     */
+    fun shouldRaiseMirrorBelowPad(
+        mirrorWindowId: Long,
+        windowBelowPadId: Long?
+    ): Boolean {
+        if (mirrorWindowId == 0L) return false
+        if (windowBelowPadId == null) return true
+        return windowBelowPadId != mirrorWindowId
+    }
+
+    /**
+     * 从自底向上的窗口堆叠列表里，取指定窗口正上方的相邻窗口。
+     */
+    fun findWindowAboveInStack(
+        stackBottomToTop: List<Long>,
+        targetWindowId: Long
+    ): Long? {
+        if (targetWindowId == 0L) return null
+        val index = stackBottomToTop.indexOf(targetWindowId)
+        return if (index >= 0 && index + 1 < stackBottomToTop.size) {
+            stackBottomToTop[index + 1]
+        } else {
+            null
+        }
+    }
+
+    /**
+     * 从自底向上的窗口堆叠列表里，取指定窗口正下方的相邻窗口。
+     */
+    fun findWindowBelowInStack(
+        stackBottomToTop: List<Long>,
+        targetWindowId: Long
+    ): Long? {
+        if (targetWindowId == 0L) return null
+        val index = stackBottomToTop.indexOf(targetWindowId)
+        return if (index > 0) stackBottomToTop[index - 1] else null
     }
 
     /**
@@ -154,6 +251,39 @@ object ControlPadRules {
     fun hasCustomWindowTitle(arguments: List<String>): Boolean {
         return arguments.any { it == "--window-title" || it.startsWith("--window-title=") }
     }
+}
+
+/**
+ * 控制条下一次 Z 轴重排动作。
+ */
+sealed interface PadZOrderAction {
+    /** 已经对齐，无需动作。 */
+    data object NoOp : PadZOrderAction
+
+    /** 直接放在置顶层最上面。 */
+    data object PlaceAtTopMost : PadZOrderAction
+
+    /**
+     * 放在普通层级最上面。
+     *
+     * @param demoteFromTopMost 控制条当前处于置顶层，需要先降回普通层级
+     */
+    data class PlaceAtNormalTop(
+        val demoteFromTopMost: Boolean
+    ) : PadZOrderAction
+
+    /**
+     * 放到指定兄弟窗口正下方。
+     *
+     * @param siblingWindowId 目标兄弟窗口 id
+     * @param targetAlwaysOnTop 控制条应处于的层级带
+     * @param changeTopMostBand 是否需要切换层级带
+     */
+    data class PlaceBelowSibling(
+        val siblingWindowId: Long,
+        val targetAlwaysOnTop: Boolean,
+        val changeTopMostBand: Boolean
+    ) : PadZOrderAction
 }
 
 /**
